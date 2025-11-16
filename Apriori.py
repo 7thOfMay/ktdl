@@ -93,6 +93,15 @@ def write_output(file_path, sku, product_info, recommendations):
                 f"| diff={row['amount_diff']}\n"
             )
 
+def save_apriori_rules(rules_df, filename="output_apriori/apriori_rules.csv"):
+    # Chuyển antecedents và consequents thành dạng list/string
+    rules_export = rules_df.copy()
+    rules_export["antecedents"] = rules_export["antecedents"].apply(lambda x: ','.join(list(x)) if isinstance(x, frozenset) else str(x))
+    rules_export["consequents"] = rules_export["consequents"].apply(lambda x: ','.join(list(x)) if isinstance(x, frozenset) else str(x))
+
+    # Lưu file CSV
+    rules_export.to_csv(filename, index=False, encoding="utf-8")
+    print(f"✔ Đã lưu {len(rules_export)} luật Apriori vào {filename}")
 
 # =========================
 # 4. MAIN — chạy test 100 SKU
@@ -102,6 +111,10 @@ if __name__ == "__main__":
 
     print("🔍 Đang chạy Apriori attribute-based…")
     df, rules = generate_apriori_rules(csv_path)
+
+    # --- Lưu toàn bộ luật Apriori ra file CSV ---
+    os.makedirs("outputs_apriori", exist_ok=True)
+    save_apriori_rules(rules, "output_apriori/apriori_rules.csv")
 
     print("➡ Lấy 100 SKU đầu tiên trong dataset để test…")
     sku_list = df["SKU"].unique()[:100]

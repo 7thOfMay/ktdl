@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,18 +8,11 @@ from sklearn.cluster import MiniBatchKMeans
 from sklearn.metrics import silhouette_score, davies_bouldin_score
 from sklearn.metrics.pairwise import cosine_similarity
 
-# =================================
-# Cấu hình đường dẫn
-# =================================
-DATA_PATH = "new_data_to_analysis.csv"
-OUTPUT_DIR = Path("outputs_cluster")
-OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
-
-# =================================
+# =========================
 # 1. Build feature matrix
-# =================================
+# =========================
 def build_features(df: pd.DataFrame):
-    cat_cols = [c for c in ["Category","Style","Size","Core"] if c in df.columns]
+    cat_cols = [c for c in ["Category","Style","Size"] if c in df.columns]
     num_cols = [c for c in ["Amount"] if c in df.columns]
     ct = ColumnTransformer(
         transformers=[
@@ -30,10 +24,10 @@ def build_features(df: pd.DataFrame):
     X = ct.fit_transform(df[cat_cols + num_cols])
     return X, ct
 
-# =================================
+# =========================
 # 2. Train MiniBatchKMeans
-# =================================
-def train_cluster(df: pd.DataFrame, n_clusters=8, batch_size=1024, random_state=42):
+# =========================
+def train_cluster(df: pd.DataFrame, n_clusters=2, batch_size=1024, random_state=42):
     df = df.drop_duplicates(subset=["SKU"]).reset_index(drop=True)
     X, ct = build_features(df)
     kmeans = MiniBatchKMeans(n_clusters=n_clusters, batch_size=batch_size, random_state=random_state)
@@ -43,9 +37,9 @@ def train_cluster(df: pd.DataFrame, n_clusters=8, batch_size=1024, random_state=
     dbi_score = davies_bouldin_score(X, labels) if n_clusters > 1 else np.nan
     return df, X, kmeans, ct, sil_score, dbi_score
 
-# =================================
-# 3. Recommend SKU
-# =================================
+# =========================
+# 3. Recommend SKU using clustering
+# =========================
 def recommend_by_sku_cluster(sku, df, X, top_n=5, price_tol=10.0):
     row = df[df["SKU"] == sku]
     if row.empty:
@@ -73,76 +67,129 @@ def recommend_by_sku_cluster(sku, df, X, top_n=5, price_tol=10.0):
     if cand.empty:
         return pd.DataFrame()
 
-    # Tính cosine similarity
+    # Cosine similarity
     ref_vec = X[row.name:row.name+1]
     cand_vecs = X[cand.index]
     cand["cosine_sim"] = cosine_similarity(ref_vec, cand_vecs).ravel()
-
-    # Khoảng cách Amount
     cand["amount_diff"] = abs(cand["Amount"] - ref_amount)
 
-    # Sắp xếp: cosine cao → amount_diff thấp
-    cand = cand.sort_values(by=["cosine_sim","amount_diff"], ascending=[False, True])
+    # Sắp xếp
+    # cand = cand.sort_values(by=["cosine_sim","amount_diff"], ascending=[False, True])
+    cand = cand.sort_values(by=["amount_diff", "cosine_sim"], ascending=[True, False])
+
 
     return cand.head(top_n)[["SKU","Category","Core","Style","Size","Amount","Cluster","cosine_sim","amount_diff"]]
 
-# =================================
-# 4. Write recommendations + metrics tổng hợp
-# =================================
-def write_recommendations(sku_list, df, X, top_n=5, price_tol=10.0):
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    metrics_records = []
+# =========================
+# 4. Đánh giá 1 testcase
+# =========================
+def evaluate_single_testcase(file_path, df, X, top_n=5, price_tol=10.0):
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
 
-    for idx, sku in enumerate(sku_list, start=1):
-        recs = recommend_by_sku_cluster(sku, df, X, top_n=top_n, price_tol=price_tol)
-        file_path = OUTPUT_DIR / f"output_{idx}.txt"
-        # Lưu file text
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(f"=== GỢI Ý SẢN PHẨM CHO SKU: {sku} ===\n\n")
-            if recs.empty:
-                f.write("Không tìm thấy sản phẩm gợi ý phù hợp.\n")
-            else:
-                for _, r in recs.iterrows():
-                    f.write(f"- {r['SKU']} | {r['Category']} | {r['Core']} | {r['Style']} | {r['Size']} | "
-                            f"{r['Amount']} | cosine={r['cosine_sim']:.4f} | diff={r['amount_diff']:.2f}\n")
-        print(f"✔ Đã lưu gợi ý SKU {sku} -> {file_path}")
+    if not lines:
+        return {
+            "file": os.path.basename(file_path),
+            "sku_main": None,
+            "old_skus": [],
+            "new_skus": [],
+            "passed": False
+        }
 
-        # Lưu metrics tổng hợp cho SKU
-        metrics_records.append({
-            "SKU": sku,
-            "num_candidates": len(df[(df["Cluster"] == df.loc[df["SKU"]==sku].index[0]) & 
-                                      (df["SKU"] != sku)]),
-            "num_after_filter": len(recs),
-            "max_cosine": recs["cosine_sim"].max() if not recs.empty else np.nan,
-            "mean_cosine": recs["cosine_sim"].mean() if not recs.empty else np.nan,
-        })
+    # SKU chính
+    sku_main = lines[0].split("(")[1].split(")")[0]
 
-    # Lưu metrics tổng hợp vào 1 file CSV
-    metrics_df = pd.DataFrame(metrics_records)
-    metrics_file = OUTPUT_DIR / "recommendation_metrics_summary.csv"
-    metrics_df.to_csv(metrics_file, index=False)
-    print(f"📄 Metrics tổng hợp gợi ý đã lưu tại {metrics_file}")
+    # SKU gợi ý cũ
+    old_skus = []
+    for line in lines:
+        if line.startswith("- "):
+            sku = line.split("|")[0].strip()[2:]
+            old_skus.append(sku)
 
-# =================================
-# 5. Save clustering metrics
-# =================================
-def save_clustering_metrics(sil, dbi, filename=OUTPUT_DIR / "clustering_metrics.txt"):
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"Silhouette Score: {sil}\n")
-        f.write(f"Davies-Bouldin Index: {dbi}\n")
-    print(f"📄 Metrics clustering đã lưu tại {filename}")
+    # SKU gợi ý mới từ clustering
+    new_recs_df = recommend_by_sku_cluster(sku_main, df, X, top_n=top_n, price_tol=price_tol)
+    new_skus = new_recs_df["SKU"].tolist() if not new_recs_df.empty else []
 
-# =================================
+    testcase_passed = set(old_skus) == set(new_skus)
+
+    return {
+        "file": os.path.basename(file_path),
+        "sku_main": sku_main,
+        "old_skus": old_skus,
+        "new_skus": new_skus,
+        "passed": testcase_passed
+    }
+
+# =========================
+# 5. Đánh giá tất cả testcase
+# =========================
+def evaluate_all_testcases(df, X, output_dir, top_n=5, price_tol=10.0):
+    files = sorted([f for f in Path(output_dir).glob("*.txt")])
+    results = []
+
+    for f in files:
+        result = evaluate_single_testcase(f, df, X, top_n=top_n, price_tol=price_tol)
+        results.append(result)
+
+    results_df = pd.DataFrame(results)
+    total_cases = len(results_df)
+    passed_cases = results_df["passed"].sum() if total_cases > 0 else 0
+    accuracy = passed_cases / total_cases * 100 if total_cases > 0 else 0
+
+    print(f"\nTổng testcase: {total_cases}")
+    print(f"Số testcase đúng: {passed_cases}/{total_cases}")
+    print(f"Tỷ lệ chính xác: {accuracy:.2f}%")
+
+    # Lưu kết quả
+    results_df.to_csv("cluster_testcase_results.csv", index=False)
+    print("✔ Đã lưu kết quả chi tiết vào cluster_testcase_results.csv")
+    return results_df
+
+# =========================
 # MAIN
-# =================================
+# =========================
+DATA_PATH = "new_data_to_analysis.csv"
+OUTPUT_DIR = "output_total"  # thư mục chứa các file output cũ
+
 if __name__ == "__main__":
     df = pd.read_csv(DATA_PATH)
-    df, X, kmeans, ct, sil_score, dbi_score = train_cluster(df, n_clusters=8)
+    df, X, kmeans, ct, sil_score, dbi_score = train_cluster(df, n_clusters=4)
     print(f"✅ Clustering xong | Silhouette: {sil_score:.4f}, DBI: {dbi_score:.4f}")
 
-    save_clustering_metrics(sil_score, dbi_score)
+    # Đánh giá tất cả testcase
+    evaluate_all_testcases(df, X, OUTPUT_DIR, top_n=5, price_tol=10.0)
+    print("Hoàn tất đánh giá tất cả testcase bằng clustering.")
 
-    # Lấy 100 SKU đầu tiên để test
-    sku_list = df["SKU"].unique()[:100]
-    write_recommendations(sku_list, df, X, top_n=5, price_tol=10)
-    print("🎉 Hoàn tất: tất cả 100 file gợi ý đã tạo xong.")
+# import matplotlib.pyplot as plt
+
+# if __name__ == "__main__":
+#     df = pd.read_csv(DATA_PATH)
+    
+#     # Build feature matrix
+#     X, ct = build_features(df)
+
+#     # Danh sách lưu inertia
+#     inertia = []
+#     ks = range(2, 11)
+
+#     for k in ks:
+#         # MiniBatchKMeans
+#         kmeans = MiniBatchKMeans(
+#             n_clusters=k,
+#             batch_size=1024,      # kích thước batch, có thể chỉnh lớn hơn hoặc nhỏ hơn
+#             random_state=42,
+#             max_iter=300,
+#             n_init=10             # số lần khởi tạo, thường nhỏ hơn KMeans chuẩn
+#         )
+#         kmeans.fit(X)             # chỉ fit, không cần lấy labels ngay
+#         inertia.append(kmeans.inertia_)
+
+#     # Vẽ Elbow plot
+#     plt.figure(figsize=(8,5))
+#     plt.plot(ks, inertia, marker='o', linestyle='-')
+#     plt.title('Elbow Method – Xác định số cụm K tối ưu (MiniBatchKMeans)')
+#     plt.xlabel('Số cụm (k)')
+#     plt.ylabel('Inertia')
+#     plt.grid(True)
+#     plt.show()
+   

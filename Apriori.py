@@ -1,4 +1,3 @@
-# apriori_recommend_fixed.py
 import os
 import pandas as pd
 from mlxtend.frequent_patterns import apriori, association_rules
@@ -18,16 +17,13 @@ def generate_apriori_rules(csv_path, min_support=0.1, min_lift=1):
     rules = rules.sort_values(by="lift", ascending=False)
     return df, rules
 
-
 # =========================
-# 2. Recommend for a SKU
+# 2. Gợi ý sản phẩm cho SKU
 # =========================
 def recommend_by_sku(sku, df, rules=None, top_n=5, price_tol=10.0):
     product = df[df["SKU"] == sku]
     if product.empty:
-        print(f"SKU {sku} không tồn tại.")
         return pd.DataFrame()
-    
     product = product.iloc[0]
 
     category = product["Category"]
@@ -41,7 +37,7 @@ def recommend_by_sku(sku, df, rules=None, top_n=5, price_tol=10.0):
         (df["Size"] == size) &
         (df['Core'] == core) &
         (df['Category'] == category)
-        ].copy()
+    ].copy()
 
     candidates["similarity_score"] = (
         (candidates["Category"] == category).astype(int) +
@@ -51,84 +47,84 @@ def recommend_by_sku(sku, df, rules=None, top_n=5, price_tol=10.0):
     )
 
     candidates = candidates[candidates["similarity_score"] >= 2]
-    
-    # --- TÍNH CHÊNH LỆCH GIÁ ---
     candidates["amount_diff"] = abs(candidates["Amount"] - amount)
-    
-    # --- LỌC CHÊNH LỆCH GIÁ THEO THAM SỐ ---
     candidates = candidates[candidates["amount_diff"] <= price_tol]
-    
     candidates = candidates.drop_duplicates(subset="SKU")
-
-    candidates = candidates.sort_values(
-        by=["similarity_score", "amount_diff"],
-        ascending=[False, True]
-    )
+    candidates = candidates.sort_values(by=["similarity_score","amount_diff"], ascending=[False, True])
 
     return candidates.head(top_n)[
         ["SKU","Category","Core","Size","Amount","similarity_score","amount_diff"]
     ]
 
+# =========================
+# 3. Đánh giá 1 testcase
+# =========================
+def evaluate_single_testcase(file_path, df, rules=None, top_n=5, price_tol=10.0):
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    
+    # SKU chính
+    sku_main = lines[0].split("(")[1].split(")")[0]
 
+    # SKU gợi ý cũ
+    old_skus = []
+    for line in lines:
+        if line.startswith("- "):
+            sku = line.split("|")[0].strip()[2:]
+            old_skus.append(sku)
+
+    # SKU gợi ý mới từ Apriori
+    new_recs_df = recommend_by_sku(sku_main, df, rules=rules, top_n=top_n, price_tol=price_tol)
+    new_skus = new_recs_df["SKU"].tolist()
+
+    # So sánh: tất cả SKU cũ có trùng hết với gợi ý mới => đúng
+    testcase_passed = set(old_skus) == set(new_skus)
+
+    return {
+        "file": os.path.basename(file_path),
+        "sku_main": sku_main,
+        "old_skus": old_skus,
+        "new_skus": new_skus,
+        "passed": testcase_passed
+    }
 
 # =========================
-# 3. Ghi file output test
+# 4. Đánh giá tất cả testcase trong folder
 # =========================
-def write_output(file_path, sku, product_info, recommendations):
-    """Ghi file txt"""
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(f"=== GỢI Ý SẢN PHẨM CHO SKU: {sku} ===\n\n")
-        f.write(">>> THÔNG TIN SẢN PHẨM GỐC:\n")
-        f.write(str(product_info) + "\n\n")
+def evaluate_all_testcases(df, output_dir, rules=None, top_n=5, price_tol=10.0):
+    files = [f for f in os.listdir(output_dir) if f.endswith(".txt")]
+    files.sort()
+    results = []
 
-        f.write(">>> TOP GỢI Ý (Apriori + Similarity):\n")
-        if recommendations.empty:
-            f.write("KHÔNG CÓ GỢI Ý\n")
-            return
+    for f in files:
+        file_path = os.path.join(output_dir, f)
+        result = evaluate_single_testcase(file_path, df, rules=rules, top_n=top_n, price_tol=price_tol)
+        results.append(result)
+        # status = "PASSED ✅" if result["passed"] else "FAILED ❌"
+        # print(f"{f}: {status}")
 
-        for idx, row in recommendations.iterrows():
-            f.write(
-                f"- {row['SKU']} | core={row['Core']} | size={row['Size']} "
-                f"| amount={row['Amount']} | score={row['similarity_score']} "
-                f"| diff={row['amount_diff']}\n"
-            )
+    results_df = pd.DataFrame(results)
+    total_cases = len(results_df)
+    passed_cases = results_df["passed"].sum()
+    accuracy = passed_cases / total_cases * 100 if total_cases > 0 else 0
 
-def save_apriori_rules(rules_df, filename="output_apriori/apriori_rules.csv"):
-    # Chuyển antecedents và consequents thành dạng list/string
-    rules_export = rules_df.copy()
-    rules_export["antecedents"] = rules_export["antecedents"].apply(lambda x: ','.join(list(x)) if isinstance(x, frozenset) else str(x))
-    rules_export["consequents"] = rules_export["consequents"].apply(lambda x: ','.join(list(x)) if isinstance(x, frozenset) else str(x))
+    print(f"\nTổng testcase: {total_cases}")
+    print(f"Số testcase đúng: {passed_cases}/{total_cases}")
+    print(f"Tỷ lệ chính xác: {accuracy:.2f}%")
 
-    # Lưu file CSV
-    rules_export.to_csv(filename, index=False, encoding="utf-8")
-    print(f"✔ Đã lưu {len(rules_export)} luật Apriori vào {filename}")
+    # Lưu kết quả chi tiết
+    results_df.to_csv("apriori_testcase_results.csv", index=False)
+    print("✔ Đã lưu kết quả chi tiết vào apriori_testcase_results.csv")
+    return results_df
 
 # =========================
-# 4. MAIN — chạy test 100 SKU
+# MAIN
 # =========================
-if __name__ == "__main__":
-    csv_path = "new_data_to_analysis.csv"
+DATA_PATH = "new_data_to_analysis.csv"
+OUTPUT_DIR = "output_total"  # thư mục chứa file output cũ
 
-    print("🔍 Đang chạy Apriori attribute-based…")
-    df, rules = generate_apriori_rules(csv_path)
+# 1. Sinh rules Apriori
+df, rules = generate_apriori_rules(DATA_PATH, min_support=0.1, min_lift=1)
 
-    # --- Lưu toàn bộ luật Apriori ra file CSV ---
-    os.makedirs("outputs_apriori", exist_ok=True)
-    save_apriori_rules(rules, "output_apriori/apriori_rules.csv")
-
-    print("➡ Lấy 100 SKU đầu tiên trong dataset để test…")
-    sku_list = df["SKU"].unique()[:100]
-
-    os.makedirs("output_apriori", exist_ok=True)
-
-    for idx, sku in enumerate(sku_list, start=1):
-        product_info = df[df["SKU"] == sku].iloc[0]
-
-        recs = recommend_by_sku(sku, df, rules, top_n=5)
-
-        output_path = f"output_apriori/output_{idx}.txt"
-        write_output(output_path, sku, product_info, recs)
-
-        print(f"✔ File {output_path} đã tạo xong cho SKU {sku}")
-
-    print("\n🎉 HOÀN TẤT! ĐÃ TẠO 100 FILE TRONG THƯ MỤC output_apriori/")
+# 2. Đánh giá tất cả testcase
+results_df = evaluate_all_testcases(df, OUTPUT_DIR, rules=rules, top_n=5, price_tol=10.0)
